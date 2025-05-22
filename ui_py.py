@@ -1,6 +1,9 @@
 import streamlit as st
+import json
 import pandas as pd
 import os
+import sqlite3
+from datetime import datetime
 
 # Import functions from agents.py instead of agent.py
 # The error shows ModuleNotFoundError for 'agent'
@@ -9,7 +12,8 @@ try:
         run_security_workflow,
         resume_workflow_with_human_input,
         parse_logs,
-        initialize_workflow
+        initialize_workflow,
+        save_workflow_result
     )
 except ImportError:
     # Create placeholder functions for demo mode if module not found
@@ -55,6 +59,67 @@ except ImportError:
     def initialize_workflow():
         """Placeholder function for demo mode"""
         return True
+
+# Database functions
+def get_database_connection():
+    """Get a connection to the SQLite database."""
+    return sqlite3.connect('security_workflow.db')
+
+def fetch_all_cases():
+    """Fetch all cases from the database."""
+    try:
+        conn = get_database_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT id, username, timestamp, result_json 
+        FROM workflow_results 
+        ORDER BY timestamp DESC
+        ''')
+        
+        cases = []
+        for row in cursor.fetchall():
+            case_id, username, timestamp, result_json = row
+            try:
+                result_data = json.loads(result_json)
+                cases.append({
+                    'id': case_id,
+                    'username': username,
+                    'timestamp': timestamp,
+                    'result_data': result_data
+                })
+            except json.JSONDecodeError:
+                st.error(f"Error parsing case {case_id} data")
+                continue
+        
+        conn.close()
+        return cases
+    
+    except sqlite3.Error as e:
+        st.error(f"Database error: {e}")
+        return []
+    except Exception as e:
+        st.error(f"Unexpected error: {e}")
+        return []
+
+def delete_case(case_id):
+    """Delete a specific case from the database."""
+    try:
+        conn = get_database_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('DELETE FROM workflow_results WHERE id = ?', (case_id,))
+        conn.commit()
+        conn.close()
+        
+        return True
+    except sqlite3.Error as e:
+        st.error(f"Error deleting case: {e}")
+        return False
+
+def export_case_to_json(case_data):
+    """Export case data to JSON format."""
+    return json.dumps(case_data, indent=2, default=str)
 
 # Configure the Streamlit page
 st.set_page_config(
@@ -194,6 +259,105 @@ def display_trust_scores(scores):
     else:
         st.error(f"Autonomy Level: {autonomy.upper()} - High level of human oversight required")
 
+def display_agent_output_detailed(agent_name, agent_data):
+    """Display detailed output for a specific agent"""
+    if not agent_data:
+        st.info(f"No data available for {agent_name}")
+        return
+    
+    with st.expander(f"🔍 {agent_name} Output", expanded=False):
+        if isinstance(agent_data, dict):
+            # Display key metrics at the top
+            if agent_name == "Detection Agent" and "alerts" in agent_data:
+                alerts = agent_data["alerts"]
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Alerts Generated", len(alerts))
+                with col2:
+                    high_severity = len([a for a in alerts if a.get('severity') == 'high'])
+                    st.metric("High Severity Alerts", high_severity)
+                
+                if alerts:
+                    st.subheader("Generated Alerts")
+                    display_alert_table(alerts)
+            
+            elif agent_name == "Investigation Agent":
+                display_investigation_results(agent_data)
+            
+            elif agent_name == "Correlation Agent":
+                display_correlation_results(agent_data)
+            
+            elif agent_name == "Threat Intelligence Agent":
+                if agent_data and agent_data != {"result": "No threats identified that require external intelligence"}:
+                    st.subheader("Threat Intelligence Analysis")
+                    st.write(f"**Overall Assessment:** {agent_data.get('overall_assessment', 'Not available')}")
+                    
+                    intel_results = agent_data.get("intel_results", {})
+                    for alert_id, intel in intel_results.items():
+                        with st.expander(f"Intelligence for Alert {alert_id}"):
+                            if intel.get("matched_iocs"):
+                                st.write("**Matched Indicators of Compromise:**")
+                                for ioc in intel.get("matched_iocs", []):
+                                    st.write(f"- {ioc}")
+                            
+                            if intel.get("mitre_techniques"):
+                                st.write("**MITRE ATT&CK Techniques:**")
+                                for tech in intel.get("mitre_techniques", []):
+                                    st.write(f"- {tech}")
+                            
+                            if intel.get("threat_actors"):
+                                st.write("**Potential Threat Actors:**")
+                                for actor in intel.get("threat_actors", []):
+                                    st.write(f"- {actor}")
+                            
+                            st.write(f"**Confidence:** {intel.get('confidence', 'N/A')}%")
+                else:
+                    st.info("No threat intelligence data found")
+            
+            elif agent_name == "Decision Agent":
+                decision = agent_data
+                if decision and decision != {"action": "monitor", "justification": "No threats", "reasoning_path": []}:
+                    st.subheader("Decision Analysis")
+                    st.write(f"**Selected Action:** {decision.get('action', 'No action')}")
+                    st.write(f"**Justification:** {decision.get('justification', 'No justification provided')}")
+                    
+                    # Show reasoning path
+                    reasoning = decision.get("reasoning_path", [])
+                    if reasoning:
+                        st.write("**Reasoning Process:**")
+                        for i, step in enumerate(reasoning):
+                            with st.expander(f"Step {i+1}: {step.get('thought', 'Consideration')}"):
+                                st.write("**Pros:**")
+                                for pro in step.get("pros", []):
+                                    st.write(f"- {pro}")
+                                st.write("**Cons:**")
+                                for con in step.get("cons", []):
+                                    st.write(f"- {con}")
+                else:
+                    st.info("No decision data available")
+            
+            elif agent_name == "Remediation Agent":
+                rem_actions = agent_data
+                if rem_actions:
+                    st.subheader("Executed Remediation Actions")
+                    for i, action in enumerate(rem_actions):
+                        with st.expander(f"Action {i+1}: {action.get('api_endpoint', 'Unknown action')}"):
+                            st.write(f"**Status:** {action.get('execution_status', 'Unknown')}")
+                            st.write(f"**Executed at:** {action.get('execution_time', 'Unknown time')}")
+                            st.write(f"**Method:** {action.get('method', 'Unknown')}")
+                            st.write(f"**Parameters:**")
+                            for key, value in action.get('parameters', {}).items():
+                                st.write(f"- {key}: {value}")
+                            st.write(f"**Response:** {action.get('response', {}).get('status', 'No response')}")
+                else:
+                    st.info("No remediation actions taken")
+            
+            else:
+                # Generic display for other agents
+                st.json(agent_data)
+        else:
+            st.write(str(agent_data))
+
 def handle_human_feedback():
     """Handle human feedback when workflow is paused"""
     if not st.session_state.waiting_for_input:
@@ -260,9 +424,13 @@ def handle_human_feedback():
                     "summary": final_result.get("case_summary", "No summary available"),
                     "decision": human_input
                 })
+
+                # Save to database with enhanced information
+                # username = get_username_from_logs(final_result.get("parsed_logs", []))
+                save_workflow_result(username, final_result)
             
         st.success("Decision processed successfully!")
-        st.rerun()  # Use st.rerun() instead of st.experimental_rerun()
+        st.rerun()
 
 def display_final_results():
     """Display the final analysis results"""
@@ -270,7 +438,7 @@ def display_final_results():
         return
     
     results = st.session_state.results
-    
+
     st.header("Security Analysis Results")
     
     # Display tabs for different result sections
@@ -470,7 +638,7 @@ if page == "Log Analysis":
             st.session_state.results = None
             st.session_state.waiting_for_input = False
             st.session_state.case_summary = None
-            st.rerun()  # Replace with st.rerun()
+            st.rerun()
     # Otherwise show the input form
     else:
         st.write("Submit log data for security analysis.")
@@ -496,7 +664,7 @@ if page == "Log Analysis":
                 2025-05-06T18:16:07Z user=john.smith@example.com action=download file=customer_database.sql ip=91.214.123.45 location=Moscow,RU
                 2025-05-06T18:20:19Z user=john.smith@example.com action=access_admin_panel ip=91.214.123.45 location=Moscow,RU
                 """
-                st.rerun()  # Replace with st.rerun()
+                st.rerun()
         
         with tab2:
             uploaded_file = st.file_uploader("Upload log file", type=["txt", "log", "json"])
@@ -524,51 +692,281 @@ if page == "Log Analysis":
                         if "case_summary" in result:
                             st.session_state.case_summary = result["case_summary"]
                     
-                    st.rerun()  # Replace with st.rerun()
+                    st.rerun()
         
         with col2:
             if st.button("Clear Input", key="clear_input_button"):
                 st.session_state.logs = ""
-                st.rerun()  # Replace with st.rerun()
+                st.rerun()
 
 elif page == "Historical Cases":
     st.title("📚 Historical Security Cases")
     
-    if not st.session_state.history:
-        st.info("No historical cases found. Complete some analyses to build history.")
+    # Fetch all cases from database
+    cases = fetch_all_cases()
+    
+    if not cases:
+        st.info("No historical cases found in the database. Complete some analyses to build history.")
     else:
-        st.write(f"Found {len(st.session_state.history)} historical cases.")
+        st.write(f"Found **{len(cases)}** historical cases in the database.")
         
-        # Create a dataframe for easier filtering
-        history_df = pd.DataFrame(st.session_state.history)
+        # Create filters
+        col1, col2, col3 = st.columns(3)
         
-        # Add filters
-        col1, col2 = st.columns(2)
         with col1:
-            if 'username' in history_df.columns:
-                usernames = ["All"] + list(history_df['username'].unique())
-                selected_user = st.selectbox("Filter by user:", usernames)
+            usernames = ["All"] + list({case['username'] for case in cases})
+            selected_user = st.selectbox("Filter by user:", usernames)
+        
         with col2:
-            if 'threat_level' in history_df.columns:
-                levels = ["All"] + list(history_df['threat_level'].unique())
-                selected_level = st.selectbox("Filter by threat level:", levels)
+            threat_levels = ["All"] + list({
+                case['result_data']
+                    .get('investigation_results', {})
+                    .get('threat_level', 'unknown')
+                for case in cases
+            })
+            selected_threat_level = st.selectbox("Filter by threat level:", threat_levels)
+        
+        with col3:
+            date_range = st.selectbox("Filter by date:", ["All", "Last 7 days", "Last 30 days", "Last 90 days"])
         
         # Apply filters
-        filtered_history = st.session_state.history
+        filtered_cases = cases
         if selected_user != "All":
-            filtered_history = [h for h in filtered_history if h['username'] == selected_user]
-        if selected_level != "All":
-            filtered_history = [h for h in filtered_history if h['threat_level'] == selected_level]
+            filtered_cases = [c for c in filtered_cases if c['username'] == selected_user]
+        if selected_threat_level != "All":
+            filtered_cases = [
+                c for c in filtered_cases
+                if c['result_data']
+                     .get('investigation_results', {})
+                     .get('threat_level', 'unknown') == selected_threat_level
+            ]
+        if date_range != "All":
+            from datetime import datetime, timedelta
+            now = datetime.now()
+            days_map = {"Last 7 days": 7, "Last 30 days": 30, "Last 90 days": 90}
+            cutoff = now - timedelta(days=days_map[date_range])
+            filtered_cases = [
+                c for c in filtered_cases
+                if datetime.fromisoformat(c['timestamp'].replace('Z', '+00:00')) > cutoff
+            ]
         
-        # Display history
-        for i, case in enumerate(filtered_history):
-            with st.expander(f"Case {i+1}: {case['username']} at {case['timestamp']} - {case['threat_level'].upper()}"):
-                st.write(f"**User:** {case['username']}")
-                st.write(f"**Timestamp:** {case['timestamp']}")
-                st.write(f"**Threat Level:** {case['threat_level'].upper()}")
-                st.write(f"**Decision:** {'Automated Remediation' if case['decision'] == 'approve' else 'Manual Intervention'}")
-                st.markdown("**Case Summary:**")
-                st.markdown(case['summary'])
+        st.write(f"Showing **{len(filtered_cases)}** filtered cases.")
+        
+        # Bulk actions
+        ba_col1, ba_col2 = st.columns(2)
+        with ba_col1:
+            if st.button("🗑️ Clear All Cases", key="clear_all_cases"):
+                if st.confirm("Are you sure you want to delete all cases? This action cannot be undone."):
+                    try:
+                        conn = get_database_connection()
+                        conn.cursor().execute('DELETE FROM workflow_results')
+                        conn.commit()
+                        conn.close()
+                        st.success("All cases deleted successfully!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error deleting cases: {e}")
+        
+        with ba_col2:
+            if filtered_cases:
+                export_data = {
+                    "export_timestamp": datetime.now().isoformat(),
+                    "total_cases": len(filtered_cases),
+                    "cases": filtered_cases
+                }
+                st.download_button(
+                    "📥 Export Filtered Cases",
+                    data=json.dumps(export_data, indent=2, default=str),
+                    file_name=f"security_cases_export_{datetime.now():%Y%m%d_%H%M%S}.json",
+                    mime="application/json"
+                )
+        
+        # Display cases
+        for case in filtered_cases:
+            data = case['result_data']
+            threat = data.get('investigation_results', {}).get('threat_level', 'unknown')
+            alerts = data.get('alerts', [])
+            icon = {'high':'🔴','medium':'🟡','low':'🟢'}.get(threat, '⚪')
+            
+            header = f"{icon} Case #{case['id']}: {case['username']} - {threat.upper()} ({len(alerts)} alerts)"
+            with st.expander(header, expanded=False):
+                # Overview
+                st.subheader("📋 Case Overview")
+                o1, o2, o3, o4 = st.columns(4)
+                o1.metric("User", case['username'])
+                o2.metric("Timestamp", case['timestamp'])
+                o3.metric("Threat Level", threat.upper())
+                o4.metric("Alerts", len(alerts))
+                
+                # Tabs
+                tabs = st.tabs(["🚨 Detection","🔍 Investigation","🔗 Correlation","🛡️ Threat Intel","🎯 Decision","⚡ Remediation","📊 Summary"])
+                
+                # Detection
+                with tabs[0]:
+                    logs = data.get('parsed_logs', [])
+                    if logs:
+                        st.subheader("📝 Parsed Log Entries")
+                        st.dataframe(pd.DataFrame(logs), use_container_width=True)
+                    if alerts:
+                        display_alert_table(alerts)
+                
+                # Investigation
+                with tabs[1]:
+                    inv = data.get('investigation_results', {})
+                    if inv:
+                        st.subheader("🔍 Investigation Results")
+                        st.write(f"**Conclusion:** {inv.get('conclusion','N/A')}")
+                        st.write(f"**Threat Level:** {inv.get('threat_level','N/A')}")
+                        details = inv.get('details', {})
+                        if details:
+                            st.subheader("Detailed Analysis per Alert")
+                            for aid, det in details.items():
+                                st.markdown(f"---\n**Alert {aid}**")
+                                st.write(f"• Threat Status: {'⚠️ Threat' if det.get('is_threat') else '✅ No Threat'}")
+                                st.write(f"• Confidence: {det.get('confidence','N/A')}%")
+                                if 'geolocation' in det:
+                                    geo = det['geolocation']
+                                    st.write(f"• Location: {geo.get('country','Unknown')}, {geo.get('city','Unknown')}")
+                                    if geo.get('is_unusual', False):
+                                        st.warning("⚠️ Unusual location detected!")
+                                st.write(f"• Context: {det.get('context','No context')}")
+                                if det.get('entities_involved'):
+                                    st.write("• Entities Involved:")
+                                    for ent in det['entities_involved']:
+                                        st.write(f"  - {ent}")
+                    fc = data.get("fact_checker_results", {})
+                    if fc and fc != {"result":"No facts to check"}:
+                        st.subheader("🔎 Fact Checking Results")
+                        st.write(f"**Overall Assessment:** {fc.get('overall_assessment','N/A')}")
+                        for fin in fc.get("verified_findings", []):
+                            status = fin.get("verification_status","unknown")
+                            icon = "✅" if status=="confirmed" else "⚠️" if status=="partially_confirmed" else "❌"
+                            st.markdown(f"**{icon} {fin.get('finding','Unknown')}**")
+                            st.write(f"• Status: {status}")
+                            st.write(f"• Confidence: {fin.get('confidence','N/A')}%")
+                            st.write(f"• Evidence: {fin.get('evidence','No evidence provided')}")
+                
+                # Correlation
+                with tabs[2]:
+                    corr = data.get('correlation_results', {})
+                    if corr:
+                        st.subheader("Threat Correlation")
+                        st.write(f"**Storyline:** {corr.get('threat_storyline','N/A')}")
+                        if corr.get('attack_timeline'):
+                            st.write("**Attack Timeline:**")
+                            for e in corr['attack_timeline']:
+                                st.write(f"- {e.get('timestamp','')} : {e.get('event','')} ({e.get('significance','')})")
+                        if corr.get('correlated_events'):
+                            st.subheader("Correlated Events")
+                            for i, ev in enumerate(corr['correlated_events'],1):
+                                st.markdown(f"**Group {i}:** IDs {','.join(ev.get('alert_ids',[]))}")
+                                st.write(f"Type: {ev.get('correlation_type','')}, Confidence: {ev.get('confidence','N/A')}%")
+                                st.write(f"Narrative: {ev.get('narrative','No narrative')}")
+                
+                # Threat Intel
+                with tabs[3]:
+                    ti = data.get("threat_intel_data", {})
+                    if ti and ti != {"result":"No threats identified that require external intelligence"}:
+                        st.subheader("Threat Intelligence Analysis")
+                        st.write(f"**Overall Assessment:** {ti.get('overall_assessment','N/A')}")
+                        for aid, intel in ti.get("intel_results", {}).items():
+                            st.markdown(f"**Alert {aid} Intelligence**")
+                            if intel.get("matched_iocs"):
+                                st.write("• Matched IOCs:")
+                                for ioc in intel["matched_iocs"]:
+                                    st.write(f"  - {ioc}")
+                            if intel.get("mitre_techniques"):
+                                st.write("• MITRE Techniques:")
+                                for tech in intel["mitre_techniques"]:
+                                    st.write(f"  - {tech}")
+                            if intel.get("threat_actors"):
+                                st.write("• Threat Actors:")
+                                for actor in intel["threat_actors"]:
+                                    st.write(f"  - {actor}")
+                            st.write(f"• Confidence: {intel.get('confidence','N/A')}%")
+                            if intel.get("recommendations"):
+                                st.write("• Recommendations:")
+                                for rec in intel["recommendations"]:
+                                    st.write(f"  - {rec}")
+                    ctx = data.get("context_data", {})
+                    if ctx and ctx != {"result":"No context needed for this level of threat"}:
+                        st.subheader("Historical Context Analysis")
+                        st.write(f"**Semantic Context:** {ctx.get('semantic_context','N/A')}")
+                        hist = ctx.get("historical_context", {})
+                        st.markdown("---")
+                        st.write(f"- Normal Behavior: {hist.get('normal_behavior_pattern','N/A')}")
+                        st.write(f"- Org Context: {hist.get('organizational_context','N/A')}")
+                        st.write(f"- Anomalous: {'Yes' if hist.get('is_anomalous') else 'No'}")
+                        if hist.get("similar_past_incidents"):
+                            st.write("• Similar Incidents:")
+                            for inc in hist["similar_past_incidents"]:
+                                st.write(f"  - {inc}")
+                
+                # Decision
+                with tabs[4]:
+                    dec = data.get("decision", {})
+                    if dec and dec != {"action":"monitor","justification":"No threats","reasoning_path":[]}:
+                        st.subheader("Decision Analysis")
+                        st.write(f"**Action:** {dec.get('action','N/A')}")
+                        st.write(f"**Justification:** {dec.get('justification','N/A')}")
+                        for i, step in enumerate(dec.get("reasoning_path", []), 1):
+                            st.markdown(f"**Step {i}: {step.get('thought','')}**")
+                            if step.get("pros"):
+                                st.write("• Pros:")
+                                for p in step["pros"]:
+                                    st.write(f"  - {p}")
+                            if step.get("cons"):
+                                st.write("• Cons:")
+                                for c in step["cons"]:
+                                    st.write(f"  - {c}")
+                    else:
+                        st.info("No decision data available")
+                
+                # Remediation
+                with tabs[5]:
+                    rem = data.get("remediation_actions", [])
+                    if rem:
+                        st.subheader("Executed Remediation Actions")
+                        for i, action in enumerate(rem, 1):
+                            st.markdown(f"**Action {i}: {action.get('api_endpoint','')}**")
+                            st.write(f"• Status: {action.get('execution_status','')}")
+                            st.write(f"• Executed at: {action.get('execution_time','')}")
+                            st.write(f"• Method: {action.get('method','')}")
+                            st.write("• Parameters:")
+                            for k, v in action.get("parameters", {}).items():
+                                st.write(f"  - {k}: {v}")
+                            st.write(f"• Response: {action.get('response',{}).get('status','')}")
+                
+                # Summary
+                with tabs[6]:
+                    st.subheader("Case Summary")
+                    st.markdown(data.get('case_summary','No summary available'))
+                    st.markdown("---")
+                    st.subheader("Sumerized Summary")
+                    st.markdown(data.get('summary','No summary available'))
+                
+                # Case Actions
+                st.subheader("🔧 Case Actions")
+                a1, a2, a3 = st.columns(3)
+                with a1:
+                    st.download_button(
+                        "📥 Export Case",
+                        data=json.dumps(case, indent=2, default=str),
+                        file_name=f"case_{case['id']}_{case['username']}_{case['timestamp'].replace(':','-')}.json",
+                        mime="application/json",
+                        key=f"export_case_{case['id']}"
+                    )
+                with a2:
+                    if st.button("🔍 View Raw Data", key=f"view_raw_{case['id']}"):
+                        st.json(data)
+                with a3:
+                    if st.button("🗑️ Delete Case", key=f"delete_case_{case['id']}"):
+                        if delete_case(case['id']):
+                            st.success("Case deleted successfully!")
+                            st.rerun()
+                        else:
+                            st.error("Failed to delete case")
+
 
 elif page == "Settings":
     st.title("⚙️ System Settings")
@@ -577,11 +975,67 @@ elif page == "Settings":
     
     # System information
     st.header("System Information")
-    cols = st.columns(2)
+    cols = st.columns(3)
     with cols[0]:
         st.metric("Workflow Status", "Active")
     with cols[1]:
-        st.metric("Cases Processed", len(st.session_state.history))
+        case_count = len(fetch_all_cases())
+        st.metric("Total Cases", case_count)
+    with cols[2]:
+        st.metric("Database Status", "Connected")
+    
+    # Database Management
+    st.header("Database Management")
+    
+    db_cols = st.columns(2)
+    with db_cols[0]:
+        if st.button("🔧 Initialize Database", key="init_db"):
+            try:
+                conn = get_database_connection()
+                cursor = conn.cursor()
+                
+                # Create table for storing workflow results
+                cursor.execute('''
+                CREATE TABLE IF NOT EXISTS workflow_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    result_json TEXT NOT NULL
+                )
+                ''')
+                
+                conn.commit()
+                conn.close()
+                st.success("Database initialized successfully!")
+            except Exception as e:
+                st.error(f"Database initialization failed: {e}")
+    
+    with db_cols[1]:
+        if st.button("📊 Database Statistics", key="db_stats"):
+            try:
+                conn = get_database_connection()
+                cursor = conn.cursor()
+                
+                # Get table info
+                cursor.execute("SELECT COUNT(*) FROM workflow_results")
+                total_cases = cursor.fetchone()[0]
+                
+                cursor.execute("SELECT COUNT(DISTINCT username) FROM workflow_results")
+                unique_users = cursor.fetchone()[0]
+                
+                cursor.execute("SELECT MIN(timestamp), MAX(timestamp) FROM workflow_results")
+                date_range = cursor.fetchone()
+                
+                conn.close()
+                
+                st.info(f"""
+                **Database Statistics:**
+                - Total Cases: {total_cases}
+                - Unique Users: {unique_users}
+                - Date Range: {date_range[0]} to {date_range[1]}
+                """)
+            except Exception as e:
+                st.error(f"Failed to get database statistics: {e}")
     
     # API Configuration
     st.header("API Configuration")
@@ -605,7 +1059,7 @@ elif page == "Settings":
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.success("Session data cleared successfully!")
-            st.rerun()  # Replace with st.rerun()
+            st.rerun()
 
 # Footer
 st.sidebar.markdown("---")
