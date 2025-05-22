@@ -1,6 +1,7 @@
 import os
 import json
-from typing import Dict, List, Any, Optional, TypedDict, Literal
+import sqlite3
+from typing import Dict, List, Any, Optional, TypedDict
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -8,21 +9,14 @@ from dotenv import load_dotenv
 load_dotenv()
 if not os.environ.get("GOOGLE_API_KEY"):
     os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
-# if not os.environ.get("OPENAI_API_KEY"):
-#     os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
-# if not os.environ.get("ANTHROPIC_API_KEY"):
-#     os.environ["ANTHROPIC_API_KEY"] = os.getenv("ANTHROPIC_API_KEY")
 
 # LangChain imports
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, RemoveMessage
+from langchain_core.messages import HumanMessage, AIMessage, RemoveMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 
 # LangChain Google imports
 from langchain_google_genai import ChatGoogleGenerativeAI
-# from langchain_openai import ChatOpenAI
-# from langchain_anthropic import ChatAnthropic
-
 
 # LangGraph imports
 from langgraph.graph import StateGraph, END, START, MessagesState
@@ -42,24 +36,6 @@ llm = ChatGoogleGenerativeAI(
     timeout=None,
     max_retries=2,
 )
-
-# openai model
-# llm = ChatOpenAI(
-#     model="gpt-4.1",
-#     temperature=0,
-#     max_tokens=None,
-#     timeout=None,
-#     max_retries=2,
-# )
-
-# anthropic model
-# llm = ChatAnthropic(
-#     model="claude-3.7-latest",
-#     temperature=0,
-#     max_tokens=None,
-#     timeout=None,
-#     max_retries=2,
-# )
 
 # Instantiate the in-memory checkpointer
 checkpointer = MemorySaver()
@@ -114,6 +90,31 @@ class SecurityState(TypedDict):
 # LEVEL 2: DATA PROCESSING & DETECTION
 # -------------------------------
 
+# def parse_logs(logs: str) -> List[Dict[str, Any]]:
+#     """Data Collection Agent: Parses raw logs and structures them into the defined schema."""
+#     parsed = []
+#     for line in logs.strip().splitlines():
+#         if not line.strip():
+#             continue
+#         try:
+#             parsed.append(json.loads(line))
+#         except json.JSONDecodeError:
+#             parts = line.split()
+#             if len(parts) >= 3:
+#                 ts = parts[0] + " " + parts[1]
+#                 msg = " ".join(parts[2:])
+#                 ip = next((p for p in parts if p.count('.')==3 and all(x.isdigit() for x in p.split('.'))), None)
+#                 user = next((p.split('=')[1] for p in parts if 'user' in p.lower() and '=' in p), None)
+#                 parsed.append({
+#                     "timestamp": ts,
+#                     "message": msg,
+#                     "ip_address": ip,
+#                     "username": user,
+#                     "raw": line
+#                 })
+#     logger.info("Data collection agent: logs parsed successfully")
+#     return parsed
+
 def parse_logs(logs: str) -> List[Dict[str, Any]]:
     """Data Collection Agent: Parses raw logs and structures them into the defined schema."""
     parsed = []
@@ -127,13 +128,34 @@ def parse_logs(logs: str) -> List[Dict[str, Any]]:
             if len(parts) >= 3:
                 ts = parts[0] + " " + parts[1]
                 msg = " ".join(parts[2:])
-                ip = next((p for p in parts if p.count('.')==3 and all(x.isdigit() for x in p.split('.'))), None)
-                user = next((p.split('=')[1] for p in parts if 'user' in p.lower() and '=' in p), None)
+                
+                # Better IP extraction - look for patterns like ip=192.168.1.100
+                ip = None
+                for part in parts:
+                    if part.startswith("ip="):
+                        ip = part.split("=")[1]
+                        break
+                
+                # Extract username from user=john.smith@example.com pattern
+                user = None
+                for part in parts:
+                    if part.startswith("user="):
+                        user = part.split("=")[1]
+                        break
+                
+                # Extract action type
+                action = None
+                for part in parts:
+                    if part.startswith("action="):
+                        action = part.split("=")[1]
+                        break
+                
                 parsed.append({
                     "timestamp": ts,
                     "message": msg,
                     "ip_address": ip,
                     "username": user,
+                    "action": action,  # Added action extraction
                     "raw": line
                 })
     logger.info("Data collection agent: logs parsed successfully")
@@ -913,41 +935,103 @@ def simulation_training_agent(state: SecurityState) -> SecurityState:
 #     logger.info("Behavioral Memory agent: patterns updated")
 #     return state
 
+# def behavioral_memory_agent(state: SecurityState) -> SecurityState:
+#     """Behavioral Memory Agent: Monitors long-term user/system patterns and flags deviations."""
+#     # Initialize memory if not exists
+#     if state.get("behavioral_memory") is None:
+#         state["behavioral_memory"] = {}
+
+#     # Track behavioral patterns
+#     current_behavior = {
+#         "user": state["parsed_logs"][0].get("username", "unknown"),
+#         "ip": state["parsed_logs"][0].get("ip_address"),
+#         "action_types": [log.get("action") for log in state["parsed_logs"] if log.get("action")]
+#     }
+    
+#     # Get or create user profile
+#     user_key = current_behavior["user"]
+#     if user_key not in state["behavioral_memory"]:
+#         state["behavioral_memory"][user_key] = {
+#             "normal_ips": set(),
+#             "common_actions": {},
+#             "alert_history": []
+#         }
+    
+#     # Update IP patterns
+#     state["behavioral_memory"][user_key]["normal_ips"].add(current_behavior["ip"])
+    
+#     # Update action frequencies
+#     for action in current_behavior["action_types"]:
+#         state["behavioral_memory"][user_key]["common_actions"][action] = \
+#             state["behavioral_memory"][user_key]["common_actions"].get(action, 0) + 1
+    
+#     # Convert sets to lists for JSON serialization
+#     state["behavioral_memory"][user_key]["normal_ips"] = \
+#         list(state["behavioral_memory"][user_key]["normal_ips"])
+    
+#     logger.info("Behavioral Memory agent: patterns updated")
+#     return state
+
 def behavioral_memory_agent(state: SecurityState) -> SecurityState:
     """Behavioral Memory Agent: Monitors long-term user/system patterns and flags deviations."""
     # Initialize memory if not exists
     if state.get("behavioral_memory") is None:
         state["behavioral_memory"] = {}
 
-    # Track behavioral patterns
-    current_behavior = {
-        "user": state["parsed_logs"][0].get("username", "unknown"),
-        "ip": state["parsed_logs"][0].get("ip_address"),
-        "action_types": [log.get("action") for log in state["parsed_logs"] if log.get("action")]
-    }
+    # Extract all users from logs to process each one
+    users = set(log.get("username") for log in state["parsed_logs"] if log.get("username"))
     
-    # Get or create user profile
-    user_key = current_behavior["user"]
-    if user_key not in state["behavioral_memory"]:
-        state["behavioral_memory"][user_key] = {
-            "normal_ips": set(),
-            "common_actions": {},
-            "alert_history": []
-        }
-    
-    # Update IP patterns
-    state["behavioral_memory"][user_key]["normal_ips"].add(current_behavior["ip"])
-    
-    # Update action frequencies
-    for action in current_behavior["action_types"]:
-        state["behavioral_memory"][user_key]["common_actions"][action] = \
-            state["behavioral_memory"][user_key]["common_actions"].get(action, 0) + 1
+    for user in users:
+        # Get logs related to this user
+        user_logs = [log for log in state["parsed_logs"] if log.get("username") == user]
+        
+        # Extract behavior patterns for this user
+        user_ips = set(log.get("ip_address") for log in user_logs if log.get("ip_address"))
+        
+        # Extract actions and count their frequencies
+        actions = []
+        for log in user_logs:
+            # Get action from dedicated field or parse from message
+            action = log.get("action")
+            if not action and "message" in log:
+                # Try to find action= in the message
+                msg_parts = log["message"].split()
+                for part in msg_parts:
+                    if part.startswith("action="):
+                        action = part.split("=")[1]
+                        break
+            
+            if action:
+                actions.append(action)
+        
+        # Create or update user profile
+        if user not in state["behavioral_memory"]:
+            state["behavioral_memory"][user] = {
+                "normal_ips": set(),
+                "common_actions": {},
+                "alert_history": [],
+                "last_update": None
+            }
+        
+        # Update IP patterns
+        for ip in user_ips:
+            state["behavioral_memory"][user]["normal_ips"].add(ip)
+        
+        # Update action frequencies
+        for action in actions:
+            state["behavioral_memory"][user]["common_actions"][action] = \
+                state["behavioral_memory"][user]["common_actions"].get(action, 0) + 1
+        
+        # Set last update timestamp
+        from datetime import datetime
+        state["behavioral_memory"][user]["last_update"] = datetime.utcnow().isoformat()
     
     # Convert sets to lists for JSON serialization
-    state["behavioral_memory"][user_key]["normal_ips"] = \
-        list(state["behavioral_memory"][user_key]["normal_ips"])
+    for user in state["behavioral_memory"]:
+        state["behavioral_memory"][user]["normal_ips"] = \
+            list(state["behavioral_memory"][user]["normal_ips"])
     
-    logger.info("Behavioral Memory agent: patterns updated")
+    logger.info(f"Behavioral Memory agent: patterns updated for {len(users)} users")
     return state
 
 # -------------------------------
@@ -1103,6 +1187,24 @@ def get_username_from_logs(parsed_logs):
     return "unknown_user"  # Fallback
 
 
+def get_latest_workflow_result(username: str) -> Optional[Dict[str, Any]]:
+    """Retrieve the latest workflow result for a given username."""
+    conn = sqlite3.connect('security_workflow.db')
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        "SELECT result_json FROM workflow_results WHERE username = ? ORDER BY timestamp DESC LIMIT 1",
+        (username,)
+    )
+    
+    row = cursor.fetchone()
+    conn.close()
+    
+    if row:
+        return json.loads(row[0])
+    return None
+
+
 def run_security_workflow(logs: str, initial_state: SecurityState = None):
     # Build graph with in-memory checkpointing (state type + saver)
     workflow = StateGraph(SecurityState, checkpointer)
@@ -1191,25 +1293,24 @@ def run_security_workflow(logs: str, initial_state: SecurityState = None):
     username = get_username_from_logs(current_state["parsed_logs"])
     config = {"configurable": {"thread_id": username}}
 
-    # Check if there's an existing checkpoint for this user
-    try:
-        existing_state = app.get_state(config)
-        if existing_state:
-            logger.info(f"existing_state: {existing_state}")
-            # Fix: Use the StateSnapshot correctly
-            logger.info(f"Found existing checkpoint for user: {username}")
-            # Get the summary from the existing state if it exists 
-            if hasattr(existing_state, "values") and "summary" in existing_state.values:
-                summary = existing_state.values.get("summary")
-                logger.info(f"Summary from existing checkpoint: {summary}")
-                if summary:
-                    current_state["summary"] = summary
-    except Exception as e:
-        # Log the exception for debugging
-        logger.info(f"No existing checkpoint found for user: {username}. Error: {str(e)}")
-        # No existing checkpoint, continue with empty summary
-        pass
+    latest_result =  get_latest_workflow_result(username)
+    print(f"Latest result: {latest_result}")
 
+    if latest_result:
+        current_state["summary"] = latest_result.get("summary")
+        logger.info(f"Summary from existing checkpoint: {current_state['summary']}")
+
+    # Check for existing checkpoint only for new workflows
+    if not initial_state:
+        try:
+            existing_state = app.get_state(config)
+            logger.info(f"existing_state: {existing_state}")
+            # if existing_state and hasattr(existing_state, "values"):
+            #     if "summary" in existing_state.values:
+            #         current_state["summary"] = existing_state.values["summary"]
+            #         logger.info(f"Summary from existing checkpoint: {current_state['summary']}")
+        except Exception as e:
+            logger.info(f"No existing checkpoint: {str(e)}")
 
     # Run the workflow - using invoke method to get __interrupt__ info
     result = app.invoke(current_state, config=config)
@@ -1294,6 +1395,31 @@ def resume_workflow_with_human_input(state, human_input):
         config=config,
     )
 
+
+def save_workflow_result(username: str, result: Dict[str, Any]):
+    """Save workflow result to SQLite database with username and timestamp."""
+    conn = sqlite3.connect('security_workflow.db')
+    cursor = conn.cursor()
+    
+    # Convert non-serializable objects and clean the result for storage
+    clean_result = {k: v for k, v in result.items() if k not in ["__interrupt__"]}
+    result_json = json.dumps(clean_result, default=str)
+    
+    # Get current timestamp in ISO format
+    timestamp = datetime.now().isoformat()
+    
+    # Insert the record
+    cursor.execute(
+        "INSERT INTO workflow_results (username, timestamp, result_json) VALUES (?, ?, ?)",
+        (username, timestamp, result_json)
+    )
+    
+    conn.commit()
+    conn.close()
+    
+    print(f"Workflow result saved for user '{username}' at {timestamp}")
+
+
 if __name__ == "__main__":
     # Sample log data with a suspicious login from Russia
     sample_logs = """
@@ -1326,6 +1452,9 @@ if __name__ == "__main__":
 
         print("\n\nFINAL STATE AFTER HUMAN INPUT:")
         print(json.dumps({k: v for k, v in final_result.items() if k not in ["logs", "parsed_logs", "messages"]}, indent=2))
+
+        # Save the workflow result to the database
+        save_workflow_result(username, final_result)
         
         # Write the serializable state to the file
         with open("final_state.json", "w") as f:
